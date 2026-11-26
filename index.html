@@ -333,6 +333,12 @@ function score(t) {
   const crown = t.crown ? CROWN_PTS : 0, coin = Math.floor(t.coins / COIN_PER_PT);
   return { gem, set, rb, bonus: t.bonus, crown, coin, total: gem + set + rb + t.bonus + crown + coin, cnt };
 }
+// 모둠 입찰가: 모두 같은 숫자면 그 숫자, 다르면 중간값 (아무도 안 내면 null)
+function teamBid(i) {
+  const t = G.teams[i], v = t.mem.map(p => G.sug[i]?.[p]).filter(x => x != null).sort((a, b) => a - b);
+  if (!v.length) return null; const m = v.length >> 1;
+  return v.length % 2 ? v[m] : Math.floor((v[m - 1] + v[m]) / 2);
+}
 const spHtml = t => [t.shield ? `🛡️${t.shield > 1 ? '×' + t.shield : ''}` : '', t.scope ? `🔭${t.scope > 1 ? '×' + t.scope : ''}` : '', t.dbl ? `<span class="x2badge">×2</span>${t.dbl > 1 ? '×' + t.dbl : ''}` : '', t.crown ? '👑' : '', t.bonus ? `🎁${t.bonus > 0 ? '+' : ''}${t.bonus}` : ''].filter(Boolean).join(' ');
 
 /* ---------------- 작은 도구 ---------------- */
@@ -432,12 +438,12 @@ const H = {
     if (G.phase !== 'play') return;
     const ti = a.host ? (a.ti ?? -1) : this.teamOf(a.pid); if (ti < 0 && !a.host) return;
     const t = G.teams[ti], cap = a.host || (t && t.cap === a.pid);
-    if (a.t === 'sug' && G.step === 'bid' && t) { const v = this.amt(a.amt, t); if (v == null) return; (G.sug[ti] = G.sug[ti] || {})[a.pid] = v; this.pub(); }
-    else if (a.t === 'bid' && G.step === 'bid' && t && cap) { const v = this.amt(a.amt, t); if (v == null) return; G.bids[ti] = v; this.checkAll(); this.pub(); }
-    else if (a.t === 'peek' && G.step === 'bid' && t && cap && t.scope > 0) {
+    if (a.t === 'bid' && G.step === 'bid' && t && !a.host) { const v = this.amt(a.amt, t); if (v == null) return; (G.sug[ti] = G.sug[ti] || {})[a.pid] = v; this.checkAll(); this.pub(); }   // 모둠원 모두 금액을 내요
+    else if (a.t === 'peek' && G.step === 'bid' && t && t.scope > 0) {
       const tg = a.target | 0; if (tg === ti || !G.teams[tg]) return;
-      if (G.bids[tg] == null) G.peek[ti] = { tg, none: 1 };
-      else { t.scope--; G.peek[ti] = { tg, amt: G.bids[tg] }; this.say(`${tn(ti)}이 🔭 망원경으로 몰래 엿봤어요!`); }
+      const tb = teamBid(tg);
+      if (tb == null) G.peek[ti] = { tg, none: 1 };
+      else { t.scope--; G.peek[ti] = { tg, amt: tb }; this.say(`${tn(ti)}이 🔭 망원경으로 몰래 엿봤어요!`); }
       this.pub();
     }
     else if (a.t === 'raise' && G.step === 'live' && t && cap) this.raise(ti, a.inc | 0);
@@ -518,9 +524,10 @@ const H = {
   },
   checkAll() {
     const act = active();
-    if (act.length && act.every(i => G.bids[i] != null)) { if (!G.allIn) G.deadline = Math.min(G.deadline || Infinity, Date.now() + 3000); G.allIn = true; }
+    if (act.length && act.every(i => G.teams[i].mem.every(p => G.sug[i]?.[p] != null))) { if (!G.allIn) G.deadline = Math.min(G.deadline || Infinity, Date.now() + 5000); G.allIn = true; }
   },
   closeBid() {
+    active().forEach(i => G.bids[i] = teamBid(i));
     const rows = active().map(i => ({ ti: i, amt: G.bids[i] ?? 0, none: G.bids[i] == null }));
     rows.sort((a, b) => a.amt - b.amt || a.ti - b.ti);
     const cnt = {}; rows.forEach(r => { if (r.amt > 0) cnt[r.amt] = (cnt[r.amt] || 0) + 1; });
@@ -646,6 +653,7 @@ function render() {
   hostPlay();
 }
 function setScreen(s) { const ch = screen !== s; screen = s; return ch; }
+function put(id, html) { const el = document.getElementById(id); if (el && el._h !== html) { el._h = html; el.innerHTML = html; } }   // 바뀐 부분만 다시 그려서 누르던 버튼이 사라지지 않게
 
 function home() {
   setScreen('home');
@@ -664,7 +672,7 @@ window.enter = () => {
   const c = $('#jc') ? $('#jc').value.trim() : new URLSearchParams(location.search).get('c'); if (!/^\d{4}$/.test(c || '')) return toast('방 번호 4자리를 넣어 주세요');
   code = c; role = 'player'; G = null; Snd.on = LS.get('au:snd') === '1'; render();
   Net.watchPub(code, g => { if (g) off = Date.now() - g.now; G = g; render(); });
-  Net.watchBeat(code, v => { if (v !== beatVal) { const first = !beatVal; beatVal = v; beatAt = first && Math.abs(Date.now() - v) > 10000 ? 0 : Date.now(); if (G) render(); } });
+  Net.watchBeat(code, v => { if (v !== beatVal) { const was = teacherAway(), first = !beatVal; beatVal = v; beatAt = first && Math.abs(Date.now() - v) > 10000 ? 0 : Date.now(); if (G && was !== teacherAway()) render(); } });
 };
 window.leave = () => { location.href = location.pathname; };
 window.makeRoom = async () => {
@@ -740,12 +748,12 @@ function hostPlay() {
   const key = stageKey(), fresh = key !== lastKey; lastKey = key;
   // 위 막대
   const list = G.deck?.[G.round - 1] || [];
-  $('#hbar').innerHTML = `<div class="ttl">💎 블라인드 경매 대작전</div>${G.round ? `<div class="pill">${G.round}라운드 · ${ROUND_NAME[G.round]}</div><div class="dots">${list.map((x, i) => `<i class="${i < G.idx ? 'done' : i === G.idx ? 'now' : ''}"></i>`).join('')}</div>` : ''}<div class="hmsg">${esc(G.msg)}</div>`;
+  put('hbar', `<div class="ttl">💎 블라인드 경매 대작전</div>${G.round ? `<div class="pill">${G.round}라운드 · ${ROUND_NAME[G.round]}</div><div class="dots">${list.map((x, i) => `<i class="${i < G.idx ? 'done' : i === G.idx ? 'now' : ''}"></i>`).join('')}</div>` : ''}<div class="hmsg">${esc(G.msg)}</div>`);
   if (fresh) { $('#stage').innerHTML = stageHtml(); $('#stage').classList.remove('noanim'); onFresh(); }
   else stagePatch();
   $('#teams').style.gridTemplateColumns = `repeat(${G.teams.length},minmax(0,1fr))`;
-  $('#teams').innerHTML = teamsHtml();
-  $('#ctrl').innerHTML = ctrlHtml();
+  put('teams', teamsHtml());
+  put('ctrl', ctrlHtml());
   evOverlay(); uiTick();
   if (G.phase === 'end') endOv(); else if ($('#ov').dataset.k === 'end') closeOv();
 }
@@ -763,8 +771,8 @@ function stageHtml() {
   if (G.phase === 'end') return `<div class="big"><h1>🏆 경매 끝!</h1><h2>최종 점수를 공개해요</h2></div>`;
   if (G.step === 'intro') return `<div class="rules enter"><h2>💎 블라인드 경매 대작전 규칙</h2><div class="g">
     <div>🪙 모든 모둠은 <b>${won(START_COIN)}코인</b>으로 시작해요. 2·3라운드 시작 때 <b>+${ROUND_BONUS}</b>!</div>
-    <div>🤫 물건이 나오면 모둠끼리 작전을 짜고 <b>입찰 대장</b>이 금액을 몰래 내요. 대장은 경매마다 바뀌어요.</div>
-    <div>📣 대장이 아닌 친구는 태블릿으로 <b>추천 금액</b>을 보내요.</div>
+    <div>🤫 물건이 나오면 모둠원 <b>모두</b> 자기 태블릿으로 금액을 몰래 내요. 낸 숫자는 우리 모둠끼리만 보여요.</div>
+    <div>🧮 모둠 입찰가는 <b>중간값</b>! 모두 <b>같은 숫자</b>를 내면 그 숫자 그대로 들어가요.</div>
     <div>🃏 다 내면 <b>낮은 금액부터</b> 한 장씩 공개! 가장 높게 쓴 모둠이 그 값을 내고 가져가요.</div>
     <div>💥 <b>동점 폭탄</b>: 같은 금액을 쓴 모둠은 모두 탈락! 다음 순위가 낙찰받아요.</div>
     <div>💎 보석 점수 ${GEM_PTS.join('·')}점 · <b>같은 색 3개 +${SET3}</b> · <b>4색 한 세트 +${RAINBOW}</b></div>
@@ -776,7 +784,7 @@ function stageHtml() {
   if (G.step === 'roundEnd') return `<div class="big"><h1 class="enter">${G.round}라운드 끝!</h1>${standHtml()}<div class="row" style="margin-top:14px">${role === 'host' ? `<button class="go" style="font-size:28px" onclick="H.beginRound()">▶ ${G.round + 1}라운드 시작</button>` : ''}</div></div>`;
   if (!it) return '';
   if (G.step === 'show' || G.step === 'bid') return `<div class="itembox enter"><div class="itemart ${it.g?.length > 1 ? 'duo' : ''}">${itemArt(it)}</div><div class="itemtxt"><span class="kind">${itemKind(it)}</span><h2>${esc(itemName(it))}</h2><p>${itemDesc(it)}</p></div></div>
-    ${G.step === 'bid' ? `<div class="timer" id="tmr"><span id="tmrn"></span></div><div class="hint">🤫 모둠끼리 작전을 짜고 대장이 몰래 입찰! <span id="incnt"></span></div>` : `<div class="hint">곧 입찰이 시작돼요…</div>`}${pausedHtml()}`;
+    ${G.step === 'bid' ? `<div class="timer" id="tmr"><span id="tmrn"></span></div><div class="hint">🤫 모둠원 모두 금액을 내요! 같은 숫자면 그대로, 다르면 중간값 <span id="incnt"></span></div>` : `<div class="hint">곧 입찰이 시작돼요…</div>`}${pausedHtml()}`;
   if (G.step === 'reveal') {
     const R = G.reveal;
     return `<div class="reveal"><div class="mini">${it.k === 'gem' ? it.g.map(g => gemH(g)).join('') : `<span class="emo">${itemArt(it)}</span>`}<span>${esc(itemName(it))}</span></div>
@@ -811,9 +819,10 @@ function teamsHtml() {
   const sc = G.teams.map(t => score(t).total), mx = Math.max(...sc), solo = sc.filter(x => x === mx).length === 1, R = G.reveal, done = R && flipped >= R.rows.length;
   return G.teams.map((t, i) => {
     const td = TEAMS[t.id], s = score(t), capn = G.players[t.cap]?.name || '-';
-    const st = G.step === 'bid' ? (G.bids[i] != null ? '<b>✓ 입찰 완료</b>' : `✍ 고민 중 · 대장 <b>${esc(capn)}</b>`) : G.step === 'live' ? `대장 <b>${esc(capn)}</b>` : `대장 <b>${esc(capn)}</b>`;
+    const nv = t.mem.filter(p => G.sug[i]?.[p] != null).length, allv = t.mem.length && nv === t.mem.length;
+    const st = G.step === 'bid' ? (allv ? '<b>✓ 모두 입력</b>' : `✍ ${nv}/${t.mem.length}명 입력`) : `대장 <b>${esc(capn)}</b>`;
     const win = (G.step === 'result' && G.result?.ti === i) || (G.step === 'reveal' && done && R.win === i) || (G.step === 'live' && G.live?.ti === i);
-    return `<div class="tc ${G.step === 'bid' && G.bids[i] != null ? 'in' : ''} ${win ? 'win' : ''} ${solo && sc[i] === mx && G.round ? 'lead' : ''}" style="--c:${td.c}" ${role === 'host' ? `onclick="capPop(${i})"` : ''}>
+    return `<div class="tc ${G.step === 'bid' && allv ? 'in' : ''} ${win ? 'win' : ''} ${solo && sc[i] === mx && G.round ? 'lead' : ''}" style="--c:${td.c}" ${role === 'host' ? `onclick="capPop(${i})"` : ''}>
       <div class="th"><span class="e">${td.e}</span>${td.n}<span class="sc">⭐${s.total}</span></div>
       <div class="co">🪙 ${won(t.coins)}</div>
       <div class="inv">${t.gems.map(g => gemH(g)).join('')} ${spHtml(t)}</div>
@@ -863,12 +872,12 @@ function studentPlay() {
   const key = [G.n, G.step].join('|'); if (pad.k !== G.n + '') pad = { k: G.n + '', v: '' };
   let body = '', head = '';
   if (G.phase === 'end') body = studentEnd(ti);
-  else if (G.step === 'intro') body = `<div class="sbox" style="text-align:center"><div style="font-size:60px">💎</div><h2 style="margin:4px 0">앞 화면에서 규칙을 들어요</h2><p>입찰 대장은 경매마다 바뀌어요. 대장이 아닐 땐 <b>추천 금액</b>을 보내요!</p></div>`;
+  else if (G.step === 'intro') body = `<div class="sbox" style="text-align:center"><div style="font-size:60px">💎</div><h2 style="margin:4px 0">앞 화면에서 규칙을 들어요</h2><p>경매마다 모둠원 <b>모두</b> 금액을 내요. 모두 같은 숫자면 그대로, 다르면 <b>중간값</b>이 우리 모둠 금액이에요!</p></div>`;
   else if (G.step === 'round' || G.step === 'event' || G.step === 'roundEnd') body = `<div class="sbox" style="text-align:center"><div style="font-size:60px">${G.step === 'roundEnd' ? '⏳' : '📣'}</div><h2 style="margin:4px 0">${G.step === 'roundEnd' ? `${G.round}라운드 끝!` : `${G.round}라운드 · ${ROUND_NAME[G.round]}`}</h2><p>${G.step === 'event' && G.ev ? esc(G.ev.e + ' ' + G.ev.n + ' — ' + G.ev.d) : '앞 화면을 봐요!'}</p></div>`;
   else if (it) {
     head = `<div class="sbox sitem"><div class="art ${it.g?.length > 1 ? 'duo' : ''}">${itemArt(it)}</div><div><h3>${esc(itemName(it))}</h3><p>${itemDesc(it)}</p></div>${['bid', 'live', 'steal', 'show'].includes(G.step) ? `<div class="stime" id="stm"></div>` : ''}</div>`;
     let act = '';
-    if (G.step === 'show') act = `<div class="sbox capt ${isCap ? 'me' : ''}">${isCap ? '👑 이번 입찰 대장은 나!' : `👑 이번 입찰 대장: ${capn}`}</div>`;
+    if (G.step === 'show') act = it.k === 'crown' ? `<div class="sbox capt ${isCap ? 'me' : ''}">${isCap ? '👑 왕관 경매는 대장인 내가 값을 올려요!' : `👑 왕관 경매는 대장 ${capn}이(가) 값을 올려요`}</div>` : `<div class="sbox capt">💰 곧 입찰! 모둠원 모두 금액을 준비해요</div>`;
     else if (G.step === 'bid') act = bidUi(ti, t, isCap, capn);
     else if (G.step === 'reveal') { const R = G.reveal, mine = R.rows.find(r => r.ti === ti); act = `<div class="sbox sres">🃏 앞 화면에서 공개 중!<br>우리 입찰: <span class="r" style="--c:${td.c}">${mine && mine.amt ? won(mine.amt) + '코인' : '패스'}</span></div>`; }
     else if (G.step === 'result') { const R = G.result; act = `<div class="sbox sres">${R.ti === ti ? '🎉 ' : ''}${esc(R.txt)}</div>`; }
@@ -880,35 +889,35 @@ function studentPlay() {
     body = act;
   }
   const others = G.teams.map((x, j) => j === ti ? '' : `<div style="--c:${TEAMS[x.id].c}"><span>${TEAMS[x.id].e} ${TEAMS[x.id].n}</span><span>🪙${won(x.coins)} ⭐${score(x).total}</span></div>`).join('');
-  app.innerHTML = `<div class="sg ${key === lastKey ? 'noanim' : ''}">
-    <div class="shead" style="--c:${td.c}"><span class="e">${td.e}</span><div class="nm">${td.n} 모둠<small>${esc(G.players[me].name)}${isCap && G.phase === 'play' ? ' · 👑 대장' : ''}</small></div><div class="money">🪙 ${won(t.coins)}<small>⭐ ${s.total}점</small></div></div>
-    ${G.paused ? `<div class="sbox capt" style="background:#fff3c4">⏸ 선생님이 잠깐 멈췄어요</div>` : ''}
-    <div class="scols">${head ? `<div class="a-item">${head}</div>` : ''}<div class="a-act">${body}</div>
-    <div class="sbox a-inv"><div class="jua" style="margin-bottom:6px">우리 모둠 보물함</div><div class="inv2">${t.gems.length ? t.gems.map(g => gemH(g)).join('') : '<span style="opacity:.6">아직 보석이 없어요</span>'} ${spHtml(t)}</div>
-      <div style="font-size:13px;margin-top:6px">보석 ${s.gem} · 세트 ${s.set + s.rb} · 상자 ${s.bonus} · 왕관 ${s.crown} · 코인 ${s.coin} = <b>${s.total}점</b></div></div>
-    <div class="others a-oth">${others}</div></div>
-    <div style="text-align:center"><button class="sm" onclick="toggleSnd()">${Snd.on ? '🔊 소리 켜짐' : '🔇 소리 꺼짐'}</button></div>
-  </div>`;
-  lastKey = key; evOverlay(); uiTick();
+  if (!$('#s-head')) app.innerHTML = `<div class="sg"><div id="s-head"></div><div id="s-pause"></div><div class="scols"><div class="a-item" id="s-item"></div><div class="a-act" id="s-act"></div><div class="sbox a-inv" id="s-inv"></div><div class="others a-oth" id="s-oth"></div></div><div id="s-foot" style="text-align:center"></div></div>`;
+  put('s-head', `<div class="shead" style="--c:${td.c}"><span class="e">${td.e}</span><div class="nm">${td.n} 모둠<small>${esc(G.players[me].name)}${isCap && G.phase === 'play' && (G.step === 'live' || G.step === 'steal' || it?.k === 'crown') ? ' · 👑 대장' : ''}</small></div><div class="money">🪙 ${won(t.coins)}<small>⭐ ${s.total}점</small></div></div>`);
+  put('s-pause', G.paused ? `<div class="sbox capt" style="background:#fff3c4">⏸ 선생님이 잠깐 멈췄어요</div>` : '');
+  put('s-item', head);
+  if (Array.isArray(body)) { put('s-act', `<div class="sbox" data-k="${key}">${body.map((_, k) => `<div id="m${k}"></div>`).join('')}</div>`); body.forEach((h, k) => put('m' + k, h)); }
+  else put('s-act', body);
+  put('s-inv', `<div class="jua" style="margin-bottom:6px">우리 모둠 보물함</div><div class="inv2">${t.gems.length ? t.gems.map(g => gemH(g)).join('') : '<span style="opacity:.6">아직 보석이 없어요</span>'} ${spHtml(t)}</div>
+      <div style="font-size:13px;margin-top:6px">보석 ${s.gem} · 세트 ${s.set + s.rb} · 상자 ${s.bonus} · 왕관 ${s.crown} · 코인 ${s.coin} = <b>${s.total}점</b></div>`);
+  put('s-oth', others);
+  put('s-foot', `<button class="sm" onclick="toggleSnd()">${Snd.on ? '🔊 소리 켜짐' : '🔇 소리 꺼짐'}</button>`);
+  evOverlay(); uiTick();
 }
-function bidUi(ti, t, isCap, capn) {
-  const sug = Object.entries(G.sug[ti] || {}).filter(([p]) => p !== me), mySug = G.sug[ti]?.[me], mine = G.bids[ti], peek = G.peek[ti];
-  const chips = sug.length ? `<div class="chips">${sug.map(([p, v]) => `<span class="chip" ${isCap ? `onclick="padSet(${v})"` : ''}>${esc(G.players[p]?.name || '')} <b>${won(v)}</b></span>`).join('')}</div>` : `<div class="chips" style="opacity:.6;font-size:14px">${isCap ? '친구들 추천 금액이 여기에 떠요 (누르면 입력돼요)' : '모둠 친구들 추천이 여기에 떠요'}</div>`;
-  const keypad = `<div class="disp">${pad.v ? won(pad.v) : '<small>금액을 눌러요</small>'} <small>코인</small></div><div class="pad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button onclick="padIn(${n})">${n}</button>`).join('')}<button class="red" onclick="padC()">지우기</button><button onclick="padIn(0)">0</button><button onclick="padBk()">⌫</button></div>`;
-  const scope = isCap && t.scope > 0 ? `<div class="row" style="margin-top:10px"><button class="blue" onclick="scopePop()">🔭 망원경 쓰기 (${t.scope})</button></div>` : '';
-  const peekBox = peek ? `<div class="sent" style="background:#e3edff;margin:0 0 8px">🔭 ${tn(peek.tg)}: ${peek.none ? '아직 입찰 안 했어요 (다시 써 봐요)' : `<b>${won(peek.amt)}코인</b>`}</div>` : '';
-  if (isCap) return `<div class="sbox"><div class="capt me">👑 이번 입찰 대장은 나! 모둠과 의논해서 몰래 입찰해요</div>${mine != null ? `<div class="sent" style="margin:0 0 8px">✅ 제출 완료: <b>${mine ? won(mine) + '코인' : '패스'}</b> <small>· 마감 전까지 바꿀 수 있어요</small></div>` : ''}${peekBox}${chips}${keypad}
-    <button class="go subm" onclick="doBid()">${mine != null ? '🔁 다시 내기' : '🤫 비밀 입찰하기'}</button><button class="sm" style="width:100%;margin-top:8px" onclick="send({t:'bid',amt:0})">🙅 이번엔 패스 (0코인)</button>${scope}</div>`;
-  return `<div class="sbox"><div class="capt">👑 입찰 대장: ${capn} ${mine != null ? '· ✅ 제출 완료' : '· ✍ 고민 중'}</div>${chips}${keypad}
-    <button class="pri subm" onclick="doSug()">📣 대장에게 추천 보내기</button>${mySug != null ? `<div class="sent">내 추천: <b>${won(mySug)}코인</b></div>` : ''}</div>`;
+function bidUi(ti, t) {
+  const votes = G.sug[ti] || {}, mine = votes[me], peek = G.peek[ti], tb = teamBid(ti), vals = t.mem.map(p => votes[p]).filter(v => v != null), same = vals.length > 1 && vals.every(v => v === vals[0]);
+  const mates = `<div class="chips">${t.mem.map(p => { const v = votes[p]; return `<span class="chip" ${v != null && p !== me ? `onclick="padSet(${v})"` : ''} style="${p === me ? 'background:#fff3c4' : ''}">${esc(G.players[p]?.name || '')} <b>${v == null ? '…' : v ? won(v) : '패스'}</b></span>`; }).join('')}</div>`;
+  const team = `<div class="sent" style="margin:0 0 8px;background:${same ? '#d9ffe6' : '#fff'}">🧮 지금 우리 모둠 금액: <b>${tb == null ? '-' : tb ? won(tb) + '코인' : '패스'}</b><br><small>${!vals.length ? '아직 아무도 안 냈어요' : same ? '👍 모두 같은 숫자! 그대로 들어가요' : `${vals.length}/${t.mem.length}명 냈어요 · 숫자가 다르면 중간값으로 정해져요`}</small></div>`;
+  const peekBox = peek ? `<div class="sent" style="background:#e3edff;margin:0 0 8px">🔭 ${tn(peek.tg)}: ${peek.none ? '아직 아무도 안 냈어요 (다시 써 봐요)' : `지금 <b>${won(peek.amt)}코인</b>`}</div>` : '';
+  const disp = `<div class="disp">${pad.v ? won(pad.v) : '<small>금액을 눌러요</small>'} <small>코인</small></div>`, keypad = `<div class="pad">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map(n => `<button onclick="padIn(${n})">${n}</button>`).join('')}<button class="red" onclick="padC()">지우기</button><button onclick="padIn(0)">0</button><button onclick="padBk()">⌫</button></div>`;
+  const scope = t.scope > 0 ? `<div class="row" style="margin-top:10px"><button class="blue" onclick="scopePop()">🔭 망원경 쓰기 (${t.scope})</button></div>` : '';
+  return [`<div class="capt">💰 모둠원 모두 금액을 내요! 친구 숫자를 누르면 그 금액이 입력돼요</div>${mates}${team}${peekBox}`, disp, keypad,
+    `<button class="go subm" onclick="doBid()">${mine != null ? '🔁 내 금액 바꾸기' : '🤫 내 금액 내기'}</button><button class="sm" style="width:100%;margin-top:8px" onclick="send({t:'bid',amt:0})">🙅 패스 (0코인)</button>${mine != null ? `<div class="sent">내가 낸 금액: <b>${mine ? won(mine) + '코인' : '패스'}</b> <small>· 마감 전까지 바꿀 수 있어요</small></div>` : ''}${scope}`];
 }
 function liveUi(ti, t, isCap, capn) {
   const L = G.live, lead = L.ti === ti, td = L.ti >= 0 ? TD(L.ti) : null;
   const top = `<div class="disp" style="font-size:40px">${L.ti >= 0 ? `${td.e} ${won(L.top)}` : '아직 없음'} <small>코인</small></div>`;
-  if (!isCap) return `<div class="sbox">${top}<div class="capt">${lead ? '👑 지금 우리가 1등!' : `👑 대장 ${capn}이(가) 값을 올려요!`}</div></div>`;
-  return `<div class="sbox">${top}<div class="capt me">${lead ? '👑 지금 우리가 1등! 지켜봐요' : '🔥 값을 올려 왕관을 차지해요!'}</div>
-    <div class="raise">${[50, 100, 200].map(n => `<button class="pri" ${lead || L.top + n > t.coins ? 'disabled' : ''} onclick="send({t:'raise',inc:${n}})">+${n}</button>`).join('')}</div>
-    <div style="text-align:center;font-size:14px;margin-top:6px">우리 코인 ${won(t.coins)} · 올리면 ${won(L.top + 50)}부터</div></div>`;
+  if (!isCap) return [top, `<div class="capt">${lead ? '👑 지금 우리가 1등!' : `👑 대장 ${capn}이(가) 값을 올려요!`}</div>`];
+  return [top, `<div class="capt me">${lead ? '👑 지금 우리가 1등! 지켜봐요' : '🔥 값을 올려 왕관을 차지해요!'}</div>`,
+    `<div class="raise">${[50, 100, 200].map(n => `<button class="pri" ${lead || L.top + n > t.coins ? 'disabled' : ''} onclick="send({t:'raise',inc:${n}})">+${n}</button>`).join('')}</div>
+    <div style="text-align:center;font-size:14px;margin-top:6px">우리 코인 ${won(t.coins)} · 올리면 ${won(L.top + 50)}부터</div>`];
 }
 function studentEnd(ti) {
   const k = G.rank.findIndex(r => r.i === ti), r = G.rank[k], s = r.s, td = TD(ti);
@@ -918,8 +927,7 @@ window.padIn = n => { const t = G.teams[myTi()]; let v = (pad.v + n).replace(/^0
 window.padC = () => { pad.v = ''; render(); };
 window.padBk = () => { pad.v = pad.v.slice(0, -1); render(); };
 window.padSet = v => { pad.v = String(v); render(); };
-window.doBid = () => { if (pad.v === '') return toast('금액을 먼저 눌러요 (패스는 아래 버튼)'); send({ t: 'bid', amt: +pad.v }); Snd.coin(); toast('비밀 입찰 완료! 🤫'); };
-window.doSug = () => { if (pad.v === '') return toast('추천할 금액을 눌러요'); send({ t: 'sug', amt: +pad.v }); toast('대장에게 보냈어요 📣'); };
+window.doBid = () => { if (pad.v === '') return toast('금액을 먼저 눌러요 (패스는 아래 버튼)'); send({ t: 'bid', amt: +pad.v }); Snd.coin(); toast('내 금액을 냈어요 🤫'); };
 window.scopePop = () => { const ti = myTi(); openOv(`<h2 style="margin:0 0 6px">🔭 누구를 엿볼까요?</h2><p style="margin:0 0 8px;font-size:14px">그 모둠이 <b>지금</b> 낸 금액이 보여요. 아직 안 냈으면 망원경은 그대로 남아요.</p><div class="teampick">${G.teams.map((x, j) => j === ti ? '' : `<button style="--c:${TEAMS[x.id].c}" onclick="closeOv();send({t:'peek',target:${j}})"><span class="em">${TEAMS[x.id].e}</span>${TEAMS[x.id].n}</button>`).join('')}</div><button class="sm" onclick="closeOv()">닫기</button>`); };
 
 /* ---------------- 0.25초마다: 시계 · 카드 뒤집기 · 실시간 경매 ---------------- */
@@ -933,7 +941,7 @@ function uiTick() {
   }
   if (stm) { stm.textContent = G.paused ? '⏸' : L; stm.classList.toggle('hurry', hurry); }
   if (role === 'host' && ['bid', 'live'].includes(G.step) && hurry && L !== lastTickSec && L > 0) { lastTickSec = L; Snd.tick(); }
-  if (G.step === 'bid' && $('#incnt')) { const a = active(); $('#incnt').textContent = `(${a.filter(i => G.bids[i] != null).length}/${a.length} 모둠 제출)`; }
+  if (G.step === 'bid' && $('#incnt')) { const a = active(); const all = a.flatMap(i => G.teams[i].mem); $('#incnt').textContent = `(${all.filter(p => G.sug[G.teams.findIndex(t => t.mem.includes(p))]?.[p] != null).length}/${all.length}명 입력)`; }
   if (G.step === 'reveal' && $('#fl0')) {
     const R = G.reveal, n = Math.min(R.rows.length, Math.floor((now() - R.at) / REVEAL_STEP) + 1);
     if (n !== flipped) {
@@ -944,7 +952,7 @@ function uiTick() {
         R.rows.forEach((r, k) => { const el = $('#fl' + k); el.classList.toggle('win', r.ti === R.win); el.classList.toggle('boom', R.bombs.includes(r.amt)); el.classList.toggle('lose', r.ti !== R.win && !R.bombs.includes(r.amt)); });
         $('#rvh').textContent = R.win >= 0 ? `🔨 ${tn(R.win)} ${won(R.price)}코인에 낙찰!${R.bombs.length ? ' (위에서 💥 동점 폭탄!)' : ''}` : R.bombs.length ? '💥 동점 폭탄! 아무도 못 가져요' : '아무도 입찰하지 않았어요';
         if (was >= 0 && was < n) { R.bombs.length ? Snd.boom() : null; R.win >= 0 && setTimeout(() => Snd.gavel(), R.bombs.length ? 500 : 0); }
-        $('#teams') && ($('#teams').innerHTML = teamsHtml());
+        put('teams', teamsHtml());
       } else if (was >= 0 && n > 0) Snd.flip();
     }
   }
